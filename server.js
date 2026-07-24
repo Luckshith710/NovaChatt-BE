@@ -15,26 +15,40 @@ let { upload, cloudinary } = require("./config/cloudinary");
 let app = express();
 app.use(express.json());
 
-// ── CORS ──
-// In production only allow requests from the deployed frontend.
-// CLIENT_URL must be set to your Netlify URL (e.g. https://yourapp.netlify.app).
-let allowedOrigins = (process.env.CLIENT_URL || "http://localhost:5173")
-  .split(",")
-  .map((o) => o.trim());
+// ── CORS Configuration ──
+// Reads allowed origins from CLIENT_URL (supports comma-separated URLs)
+// Always allows localhost for development convenience alongside deployed frontend URLs.
+let rawClientUrls = process.env.CLIENT_URL || "";
+let allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "http://localhost:4173",
+  ...rawClientUrls.split(",").map((o) => o.trim()).filter(Boolean)
+];
 
 let corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (curl, Postman, server-to-server)
-    if (!origin || allowedOrigins.includes(origin)) {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      callback(new Error(`CORS: origin "${origin}" is not allowed`));
+      console.warn(`[CORS Warning] Blocked request from origin: "${origin}"`);
+      callback(null, false);
     }
   },
   credentials: true,
 };
 
 app.use(cors(corsOptions));
+
+// ── Health Check Endpoint ──
+app.get("/", (req, res) => {
+  res.json({
+    status: "online",
+    message: "NovaChat Backend is live & operational! 🚀",
+    timestamp: new Date().toISOString()
+  });
+});
 
 // ── Users Endpoints ──
 
@@ -321,7 +335,13 @@ app.delete("/delete/:id", (req, res) => {
 let httpServer = http.createServer(app);
 let io = new Server(httpServer, {
   cors: {
-    origin: allowedOrigins,
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
     methods: ["GET", "POST"],
     credentials: true,
   }
