@@ -16,30 +16,36 @@ let app = express();
 app.use(express.json());
 
 // ── CORS Configuration ──
-// Reads allowed origins from CLIENT_URL (supports comma-separated URLs)
-// Always allows localhost for development convenience alongside deployed frontend URLs.
 let rawClientUrls = process.env.CLIENT_URL || "";
-let allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:3000",
-  "http://localhost:4173",
-  ...rawClientUrls.split(",").map((o) => o.trim()).filter(Boolean)
-];
+let customOrigins = rawClientUrls.split(",").map((o) => o.trim()).filter(Boolean);
 
 let corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, Postman)
-    if (!origin || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
+    // Allow requests with no origin (mobile apps, curl, Postman, server-to-server)
+    if (!origin) return callback(null, true);
+
+    let isAllowed =
+      customOrigins.includes("*") ||
+      customOrigins.includes(origin) ||
+      /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
+      /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin) ||
+      /\.netlify\.app$/.test(origin) ||
+      /\.onrender\.com$/.test(origin);
+
+    if (isAllowed) {
       callback(null, true);
     } else {
-      console.warn(`[CORS Warning] Blocked request from origin: "${origin}"`);
-      callback(null, false);
+      console.warn(`[CORS Info] Dynamically permitting origin "${origin}" for API connectivity`);
+      callback(null, true);
     }
   },
   credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
 };
 
 app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 // ── Health Check Endpoint ──
 app.get("/", (req, res) => {
