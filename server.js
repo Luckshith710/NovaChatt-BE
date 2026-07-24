@@ -101,7 +101,21 @@ app.get("/users/:email", async (req, res) => {
   }
 });
 
-app.post("/users/profile-picture", upload.single("file"), async (req, res) => {
+function handleUpload(field) {
+  return (req, res, next) => {
+    upload.single(field)(req, res, (err) => {
+      if (err) {
+        console.error(`[Upload Error] Failed uploading file for field "${field}":`, err);
+        return res.status(400).json({
+          error: err.message || "File upload failed. Please verify image format and size (max 5MB)."
+        });
+      }
+      next();
+    });
+  };
+}
+
+app.post("/users/profile-picture", handleUpload("file"), async (req, res) => {
   try {
     let email = req.body.email;
     if (!email) {
@@ -139,7 +153,7 @@ app.post("/users/profile-picture", upload.single("file"), async (req, res) => {
       user: result
     });
   } catch (err) {
-    console.error("Error updating profile picture:", err);
+    console.error("[Profile Picture Error]:", err);
     res.status(500).json({ error: err.message || "Failed to update profile picture" });
   }
 });
@@ -280,7 +294,7 @@ app.post("/api/reset-password", async (req, res) => {
 
 // ── Snaps / Media Endpoints ──
 
-app.post("/upload", upload.single("file"), (req, res) => {
+app.post("/upload", handleUpload("file"), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No file provided" });
   }
@@ -328,6 +342,14 @@ app.delete("/delete/:id", (req, res) => {
       console.error("Delete error:", err);
       res.status(500).json({ error: err.message || "Failed to delete file" });
     });
+});
+
+// ── Global Error Handling Middleware ──
+app.use((err, req, res, next) => {
+  console.error("[Unhandled Express Error]:", err);
+  res.status(err.status || 500).json({
+    error: err.message || "An unexpected internal server error occurred."
+  });
 });
 
 // ── HTTP + Socket.IO Server ──
