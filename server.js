@@ -19,20 +19,21 @@ app.use(express.json());
 let rawClientUrls = process.env.CLIENT_URL || "";
 let customOrigins = rawClientUrls.split(",").map((o) => o.trim()).filter(Boolean);
 
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // Allow non-browser requests
+  return (
+    customOrigins.includes("*") ||
+    customOrigins.includes(origin) ||
+    /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
+    /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin) ||
+    /\.netlify\.app$/.test(origin) ||
+    /\.onrender\.com$/.test(origin)
+  );
+}
+
 let corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, Postman, server-to-server)
-    if (!origin) return callback(null, true);
-
-    let isAllowed =
-      customOrigins.includes("*") ||
-      customOrigins.includes(origin) ||
-      /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
-      /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin) ||
-      /\.netlify\.app$/.test(origin) ||
-      /\.onrender\.com$/.test(origin);
-
-    if (isAllowed) {
+    if (isAllowedOrigin(origin)) {
       callback(null, true);
     } else {
       console.warn(`[CORS Info] Dynamically permitting origin "${origin}" for API connectivity`);
@@ -364,10 +365,11 @@ let httpServer = http.createServer(app);
 let io = new Server(httpServer, {
   cors: {
     origin: function (origin, callback) {
-      if (!origin || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
+      if (isAllowedOrigin(origin)) {
         callback(null, true);
       } else {
-        callback(null, false);
+        console.warn(`[Socket.IO CORS] Permitting origin "${origin}"`);
+        callback(null, true);
       }
     },
     methods: ["GET", "POST"],
@@ -375,20 +377,82 @@ let io = new Server(httpServer, {
   }
 });
 
+// Map to track connected sockets: socket.id -> username
+let connectedUsersMap = new Map();
+
 io.on("connection", (socket) => {
-  socket.on("getHistory", () => {
-    messageCollec.find().toArray()
-      .then((result) => socket.emit("history", result))
-      .catch((err) => console.error("getHistory error:", err));
+  console.log(`🔌 [Socket.IO] New client connected. Socket ID: ${socket.id}`);
+
+  // User join/mapping event
+  socket.on("join", (data) => {
+    let username = typeof data === "string" ? data : data?.username;
+    if (username) {
+      connectedUsersMap.set(socket.id, username);
+      socket.join("global");
+      console.log(`👤 [Socket.IO] User mapped: ${username} -> Socket ID: ${socket.id} (Room: global)`);
+    }
   });
 
-  socket.on("message", (data) => {
-    messageCollec.insertOne(data)
-      .catch((err) => console.error("Message insert error:", err));
-    io.emit("message", data);
+  // Fetch chat history
+  socket.on("getHistory", async () => {
+    try {
+      let history = await messageCollec.find().sort({ createdAt: 1 }).toArray();
+      console.log(`📜 [Backend] Fetched ${history.length} historical messages for Socket ID: ${socket.id}`);
+      socket.emit("history", history);
+    } catch (err) {
+      console.error("❌ [Backend] getHistory error:", err);
+      socket.emit("history_error", { error: "Failed to fetch chat history" });
+    }
   });
 
-  socket.on("disconnect", () => {});
+  // Send message event handler
+  socket.on("message", async (data, callback) => {
+    console.log(`📥 [Backend request received] Message received from socket ${socket.id}:`, data);
+    try {
+      if (!data || !data.message || typeof data.message !== "string" || !data.message.trim()) {
+        throw new Error("Message content cannot be empty.");
+      }
+      if (!data.username) {
+        throw new Error("Sender username is required.");
+      }
+
+      let messageDoc = {
+        username: data.username,
+        message: data.message.trim(),
+        photoURL: data.photoURL || null,
+        createdAt: new Date()
+      };
+
+      // 1. Save message to MongoDB
+      let result = await messageCollec.insertOne(messageDoc);
+      console.log(`💾 [MongoDB save] Message saved successfully with _id: ${result.insertedId}`);
+
+      let responsePayload = {
+        ...messageDoc,
+        _id: result.insertedId
+      };
+
+      // 2. Broadcast via Socket.IO to all connected clients immediately
+      io.emit("message", responsePayload);
+      console.log(`📡 [Socket event emitted] Broadcasted 'message' event to all clients:`, responsePayload);
+
+      // 3. Return success acknowledgment to sender
+      if (typeof callback === "function") {
+        callback({ success: true, message: responsePayload });
+      }
+    } catch (err) {
+      console.error(`❌ [Backend Error] Message handling failed:`, err);
+      if (typeof callback === "function") {
+        callback({ success: false, error: err.message || "Failed to process message." });
+      }
+    }
+  });
+
+  socket.on("disconnect", (reason) => {
+    let mappedUser = connectedUsersMap.get(socket.id);
+    connectedUsersMap.delete(socket.id);
+    console.log(`❌ [Socket.IO] Client disconnected. Socket ID: ${socket.id} (${mappedUser || "Unknown user"}). Reason: ${reason}`);
+  });
 });
 
 // Render sets PORT automatically; fall back to 3000 for local dev
