@@ -141,12 +141,9 @@ function getTransporter(useFallbackPort = false) {
   }
 
   if (useFallbackPort) {
-    console.log(`[Email Service] Creating fallback transporter (smtp.gmail.com:587 STARTTLS)...`);
+    console.log(`[Email Service] Creating fallback transporter (Gmail service / port 465)...`);
     return nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 587,
-      secure: false, // TLS via STARTTLS
-      requireTLS: true,
+      service: "gmail",
       auth: { user: user || "", pass: pass || "" },
       tls: { rejectUnauthorized: false },
       connectionTimeout: 15000,
@@ -155,9 +152,12 @@ function getTransporter(useFallbackPort = false) {
     });
   }
 
-  console.log(`[Email Service] Creating primary transporter (Gmail service)...`);
+  console.log(`[Email Service] Creating primary transporter (smtp.gmail.com:587 STARTTLS)...`);
   return nodemailer.createTransport({
-    service: "gmail",
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false, // TLS via STARTTLS
+    requireTLS: true,
     auth: { user: user || "", pass: pass || "" },
     tls: { rejectUnauthorized: false },
     connectionTimeout: 15000,
