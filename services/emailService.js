@@ -1,4 +1,131 @@
 const nodemailer = require("nodemailer");
+const https = require("https");
+
+/**
+ * Send email via Resend HTTPS API (Port 443 - Never blocked on Render)
+ */
+function sendViaResend({ apiKey, to, subject, html, text, fromName, fromUser }) {
+  return new Promise((resolve) => {
+    const senderName = fromName || "NovaChat";
+    // Resend onboard sender or verified domain
+    const sender = `${senderName} <onboarding@resend.dev>`;
+    const recipients = Array.isArray(to) ? to : [to];
+    const payload = JSON.stringify({
+      from: sender,
+      to: recipients,
+      subject: subject,
+      html: html || undefined,
+      text: text || undefined,
+    });
+
+    console.log(`[Email Service] Dispatching via Resend HTTPS API for ${recipients.join(", ")}...`);
+
+    const req = https.request(
+      {
+        hostname: "api.resend.com",
+        port: 443,
+        path: "/emails",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey.trim()}`,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(body);
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              console.log(`[Email Service] ✅ Resend HTTPS API Success! Message ID: ${parsed.id}`);
+              resolve({ success: true, id: parsed.id });
+            } else {
+              console.error(`[Email Service] ❌ Resend HTTPS API Error (${res.statusCode}):`, body);
+              resolve({
+                success: false,
+                error: parsed.message || parsed.name || `Resend Error (${res.statusCode})`,
+              });
+            }
+          } catch (e) {
+            resolve({ success: false, error: `Resend HTTP error ${res.statusCode}: ${body}` });
+          }
+        });
+      }
+    );
+
+    req.on("error", (err) => {
+      console.error(`[Email Service] Resend HTTPS Connection Error:`, err);
+      resolve({ success: false, error: err.message });
+    });
+
+    req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Send email via Brevo HTTPS API (Port 443 - Never blocked on Render)
+ */
+function sendViaBrevo({ apiKey, to, subject, html, text, fromName, fromEmail }) {
+  return new Promise((resolve) => {
+    const recipients = Array.isArray(to) ? to.map((e) => ({ email: e })) : [{ email: to }];
+    const payload = JSON.stringify({
+      sender: { name: fromName || "NovaChat", email: fromEmail || "noreply@novachat.app" },
+      to: recipients,
+      subject: subject,
+      htmlContent: html,
+      textContent: text,
+    });
+
+    console.log(`[Email Service] Dispatching via Brevo HTTPS API...`);
+
+    const req = https.request(
+      {
+        hostname: "api.brevo.com",
+        port: 443,
+        path: "/v3/smtp/email",
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "api-key": apiKey.trim(),
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(body);
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              console.log(`[Email Service] ✅ Brevo HTTPS API Success! Message ID: ${parsed.messageId}`);
+              resolve({ success: true, id: parsed.messageId });
+            } else {
+              console.error(`[Email Service] ❌ Brevo HTTPS API Error (${res.statusCode}):`, body);
+              resolve({
+                success: false,
+                error: parsed.message || `Brevo Error (${res.statusCode})`,
+              });
+            }
+          } catch (e) {
+            resolve({ success: false, error: `Brevo HTTP error ${res.statusCode}: ${body}` });
+          }
+        });
+      }
+    );
+
+    req.on("error", (err) => {
+      console.error(`[Email Service] Brevo HTTPS Connection Error:`, err);
+      resolve({ success: false, error: err.message });
+    });
+
+    req.write(payload);
+    req.end();
+  });
+}
 
 /**
  * Create Gmail SMTP transporter using process.env.GMAIL_USER and process.env.GMAIL_APP_PASSWORD
@@ -49,12 +176,7 @@ function isValidEmail(email) {
 }
 
 /**
- * Send email via Gmail SMTP using Nodemailer
- * @param {Object} options
- * @param {string|string[]} options.to - Recipient email address(es)
- * @param {string} options.subject - Email subject
- * @param {string} options.html - HTML body
- * @param {string} [options.text] - Plain text body fallback
+ * Send email via Resend / Brevo HTTPS API or Gmail SMTP fallback
  */
 async function sendEmail({ to, subject, html, text }) {
   const recipients = Array.isArray(to) ? to : [to];
@@ -66,15 +188,39 @@ async function sendEmail({ to, subject, html, text }) {
     return { success: false, error: errorMsg };
   }
 
+  const fromName = process.env.EMAIL_FROM_NAME || "NovaChat";
   const gUser = process.env.GMAIL_USER ? process.env.GMAIL_USER.trim() : "";
-  // Strip ALL whitespace — Google App Passwords have spaces between 4-char groups
-  // in the UI but SMTP requires all 16 characters joined with no spaces.
   const gPass = process.env.GMAIL_APP_PASSWORD
     ? process.env.GMAIL_APP_PASSWORD.replace(/\s+/g, "")
     : "";
 
+  // 1. Check for HTTPS API Keys (Resend or Brevo) — HTTPS port 443 is NEVER blocked on Render!
+  if (process.env.RESEND_API_KEY) {
+    return await sendViaResend({
+      apiKey: process.env.RESEND_API_KEY,
+      to,
+      subject,
+      html,
+      text,
+      fromName,
+      fromUser: gUser
+    });
+  }
+
+  if (process.env.BREVO_API_KEY) {
+    return await sendViaBrevo({
+      apiKey: process.env.BREVO_API_KEY,
+      to,
+      subject,
+      html,
+      text,
+      fromName,
+      fromEmail: gUser || "noreply@novachat.app"
+    });
+  }
+
   if (!gUser || !gPass) {
-    const errorMsg = "Gmail SMTP is not configured. GMAIL_USER and GMAIL_APP_PASSWORD must be defined in .env";
+    const errorMsg = "Gmail SMTP is not configured. GMAIL_USER and GMAIL_APP_PASSWORD (or RESEND_API_KEY) must be defined in .env";
     console.error(`[Email Service] Configuration Error: ${errorMsg}`);
     return { success: false, error: errorMsg };
   }
@@ -91,7 +237,6 @@ async function sendEmail({ to, subject, html, text }) {
     return { success: false, error: errorMsg };
   }
 
-  const fromName = process.env.EMAIL_FROM_NAME || "NovaChat";
   const from = `${fromName} <${gUser}>`;
 
   // Hard deadline: if sendMail takes longer than 20 s the Promise.race
