@@ -3,10 +3,8 @@ const nodemailer = require("nodemailer");
 /**
  * Create Gmail SMTP transporter using process.env.GMAIL_USER and process.env.GMAIL_APP_PASSWORD
  */
-function getTransporter() {
+function getTransporter(useFallbackPort = false) {
   const user = process.env.GMAIL_USER ? process.env.GMAIL_USER.trim() : "";
-  // Google App Passwords are shown as '4-char 4-char 4-char 4-char' (with spaces)
-  // but SMTP requires the raw 16-character string with NO spaces whatsoever.
   const pass = process.env.GMAIL_APP_PASSWORD
     ? process.env.GMAIL_APP_PASSWORD.replace(/\s+/g, "")
     : "";
@@ -15,20 +13,26 @@ function getTransporter() {
     console.warn("[Email Service] WARNING: GMAIL_USER or GMAIL_APP_PASSWORD is missing in environment.");
   }
 
-  console.log(`[Email Service] Transporter config → user: "${user}", pass length: ${pass.length} chars (spaces stripped)`);
+  if (useFallbackPort) {
+    console.log(`[Email Service] Creating fallback transporter (smtp.gmail.com:587 STARTTLS)...`);
+    return nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false, // TLS via STARTTLS
+      requireTLS: true,
+      auth: { user: user || "", pass: pass || "" },
+      tls: { rejectUnauthorized: false },
+      connectionTimeout: 15000,
+      greetingTimeout: 12000,
+      socketTimeout: 20000,
+    });
+  }
 
+  console.log(`[Email Service] Creating primary transporter (Gmail service)...`);
   return nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 465,
-    secure: true, // use SSL
-    auth: {
-      user: user || "",
-      pass: pass || "",
-    },
-    tls: {
-      rejectUnauthorized: false
-    },
-    // Hard timeouts so the transporter never hangs the request indefinitely.
+    service: "gmail",
+    auth: { user: user || "", pass: pass || "" },
+    tls: { rejectUnauthorized: false },
     connectionTimeout: 15000,
     greetingTimeout: 12000,
     socketTimeout: 20000,
@@ -152,9 +156,10 @@ async function sendEmail({ to, subject, html, text }) {
       const sendPromise = transporter.sendMail(mailOptions);
       info = await Promise.race([sendPromise, timeoutPromise]);
     } catch (primaryErr) {
-      console.warn(`[Email Service] Primary SMTP send attempt failed: ${primaryErr.message}. Retrying in 1.5s...`);
+      console.warn(`[Email Service] Primary SMTP send attempt failed: ${primaryErr.message}. Retrying with Port 587 STARTTLS in 1.5s...`);
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      const retryPromise = transporter.sendMail(mailOptions);
+      const fallbackTransporter = getTransporter(true);
+      const retryPromise = fallbackTransporter.sendMail(mailOptions);
       info = await Promise.race([retryPromise, timeoutPromise]);
     }
 
