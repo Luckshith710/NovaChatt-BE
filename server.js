@@ -5,12 +5,64 @@ let cors = require("cors");
 let http = require("http");
 let crypto = require("crypto");
 let bcrypt = require("bcryptjs");
+let https = require("https");
 let { Server } = require("socket.io");
 let { ObjectId } = require("mongodb");
 let { sendEmail, sendPasswordResetEmail, sendWelcomeEmail } = require("./services/emailService");
 
 let { messageCollec, photoCollec, userCollec, resetTokenCollec } = require("./config/db");
 let { upload, cloudinary } = require("./config/cloudinary");
+
+// ── Firebase Admin SDK setup ──
+// Initializes Firebase Admin once using the service account credentials stored
+// in FIREBASE_SERVICE_ACCOUNT_JSON (a JSON string in .env).
+// Required to update passwords in Firebase Authentication from the backend.
+let _firebaseAuth = null;
+function getFirebaseAuth() {
+  if (_firebaseAuth) return _firebaseAuth;
+
+  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (!serviceAccountJson) {
+    throw new Error(
+      "FIREBASE_SERVICE_ACCOUNT_JSON is not set in Backend/.env. " +
+      "Generate a service account key from Firebase Console → Project Settings → Service Accounts → Generate new private key, " +
+      "then paste the entire JSON as a single line into FIREBASE_SERVICE_ACCOUNT_JSON in Backend/.env."
+    );
+  }
+
+  let serviceAccount;
+  try {
+    serviceAccount = JSON.parse(serviceAccountJson);
+  } catch (e) {
+    throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON. Make sure the entire key is on one line with no line breaks.");
+  }
+
+  const { initializeApp, getApps, cert } = require("firebase-admin/app");
+  const { getAuth } = require("firebase-admin/auth");
+
+  if (getApps().length === 0) {
+    initializeApp({ credential: cert(serviceAccount) });
+    console.log("[Firebase Admin] Initialized with service account:", serviceAccount.client_email);
+  }
+
+  _firebaseAuth = getAuth();
+  return _firebaseAuth;
+}
+
+// Updates a user's password in Firebase Authentication.
+// Uses Firebase Admin SDK — requires FIREBASE_SERVICE_ACCOUNT_JSON in .env.
+async function updateFirebasePassword(email, newPassword) {
+  const firebaseAuth = getFirebaseAuth(); // throws if not configured
+
+  console.log(`[Firebase Admin] Looking up user by email: ${email}`);
+  const userRecord = await firebaseAuth.getUserByEmail(email);
+  console.log(`[Firebase Admin] User found — UID: ${userRecord.uid}`);
+
+  await firebaseAuth.updateUser(userRecord.uid, { password: newPassword });
+  console.log(`[Firebase Admin] ✅ Password updated in Firebase Auth for UID: ${userRecord.uid}`);
+
+  return { uid: userRecord.uid };
+}
 
 let app = express();
 app.use(express.json());
@@ -168,27 +220,34 @@ app.post("/users/profile-picture", handleUpload("file"), async (req, res) => {
 app.post("/api/forgot-password", async (req, res) => {
   try {
     let { email } = req.body;
+    console.log("[Forgot Password Workflow] ── Stage 1: Received email ──", { rawInput: email });
+
     if (!email || typeof email !== "string" || !email.includes("@")) {
+      console.warn("[Forgot Password Workflow] Stage 1 FAIL: Invalid email format provided.", { email });
       return res.status(400).json({ error: "A valid email address is required." });
     }
 
     let cleanEmail = email.toLowerCase().trim();
-    console.log(`[Forgot Password] Reset request for: ${cleanEmail}`);
+    console.log(`[Forgot Password Workflow] ── Stage 2: User lookup in MongoDB for: "${cleanEmail}" ──`);
 
     // Validate that the user account exists in MongoDB before generating reset link
     let existingUser = await userCollec.findOne({ email: cleanEmail });
     if (!existingUser) {
+      console.warn(`[Forgot Password Workflow] Stage 2 FAIL: No account found in database for "${cleanEmail}"`);
       return res.status(404).json({ error: "No account found with this email address." });
     }
+    console.log(`[Forgot Password Workflow] ── Stage 2 SUCCESS: Account found (UserID: ${existingUser._id}) ──`);
 
     // Generate secure single-use token (32 bytes hex)
+    console.log("[Forgot Password Workflow] ── Stage 3: Token generation ──");
     let rawToken = crypto.randomBytes(32).toString("hex");
-
-    // Store hashed token in MongoDB user document
     let hashedToken = crypto.createHash("sha256").update(rawToken).digest("hex");
     let expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes expiration
+    console.log(`[Forgot Password Workflow] ── Stage 3 SUCCESS: Token generated. Expiration: ${expiresAt.toISOString()} ──`);
 
-    await userCollec.updateOne(
+    // Store hashed token in MongoDB user document
+    console.log("[Forgot Password Workflow] ── Stage 4: MongoDB update ──");
+    let updateResult = await userCollec.updateOne(
       { _id: existingUser._id },
       {
         $set: {
@@ -198,32 +257,40 @@ app.post("/api/forgot-password", async (req, res) => {
         }
       }
     );
+    console.log(`[Forgot Password Workflow] ── Stage 4 SUCCESS: MongoDB updated (Matched: ${updateResult.matchedCount}, Modified: ${updateResult.modifiedCount}) ──`);
 
     let clientUrl = process.env.CLIENT_URL || "http://localhost:5173";
     let resetLink = `${clientUrl}/change?token=${rawToken}`;
+    console.log(`[Forgot Password Workflow] Reset URL generated: ${resetLink}`);
 
     // Send the password reset email to the user-entered email address
+    console.log(`[Forgot Password Workflow] ── Stage 5: Recipient email & Dispatch attempt for "${cleanEmail}" ──`);
     let emailResult = await sendPasswordResetEmail(cleanEmail, resetLink);
+    console.log(`[Forgot Password Workflow] ── Stage 5 DONE: emailResult.success = ${emailResult.success} ──`);
 
     if (!emailResult.success) {
-      console.error(`[Forgot Password] Failed to send email to ${cleanEmail}:`, emailResult.error);
+      console.error(`[Forgot Password Workflow] Stage 5 FAIL: Email delivery failed for "${cleanEmail}". Reason:`, emailResult.error);
+      console.log("[Forgot Password Workflow] ── Stage 6: Final API response (500 Error) ──");
       return res.status(500).json({
-        error: emailResult.error || "Failed to send password reset email."
+        error: "Unable to send the password reset email. Please try again later."
       });
     }
 
-    console.log(`[Forgot Password] Reset email delivered to ${cleanEmail}. ID: ${emailResult.id}`);
-
-    res.json({
+    console.log(`[Forgot Password Workflow] ── Stage 6: Final API response (200 Success) — Email Message-ID: ${emailResult.id} ──`);
+    return res.json({
       success: true,
-      message: `Password reset link sent to ${cleanEmail}! Check your inbox (and spam folder) 📬`,
+      message: "A password reset link has been sent to your email.",
       recipient: cleanEmail,
       emailId: emailResult.id
     });
   } catch (err) {
-    console.error("Forgot password handler error:", err);
-    res.status(500).json({
-      error: err.message || "An unexpected error occurred while processing password reset."
+    console.error("[Forgot Password Workflow] ── UNHANDLED ERROR in handler:", {
+      message: err.message,
+      stack: err.stack
+    });
+    console.log("[Forgot Password Workflow] ── Stage 6: Final API response (500 Error) ──");
+    return res.status(500).json({
+      error: "Unable to send the password reset email. Please try again later."
     });
   }
 });
@@ -256,46 +323,69 @@ app.get("/api/verify-reset-token", async (req, res) => {
 app.post("/api/reset-password", async (req, res) => {
   try {
     let { token, newPassword } = req.body;
+
+    // ── Validate inputs ──
     if (!token || !newPassword) {
       return res.status(400).json({ error: "Token and new password are required" });
     }
-
     if (typeof newPassword !== "string" || newPassword.length < 6) {
       return res.status(400).json({ error: "Password must be at least 6 characters long" });
     }
 
+    // ── Step 1: Validate MongoDB reset token ──
+    console.log("[Reset Password] Step 1: Validating reset token...");
     let hashedToken = crypto.createHash("sha256").update(token).digest("hex");
-
     let user = await userCollec.findOne({ resetPasswordToken: hashedToken });
     if (!user) {
+      console.warn("[Reset Password] Step 1 FAIL: Token not found in database.");
       return res.status(400).json({ error: "Invalid or already used password reset token." });
     }
-
     if (!user.resetPasswordExpires || new Date(user.resetPasswordExpires) < new Date()) {
-      return res.status(400).json({ error: "This password reset token has expired." });
+      console.warn(`[Reset Password] Step 1 FAIL: Token expired for ${user.email}.`);
+      return res.status(400).json({ error: "This password reset token has expired. Please request a new link." });
+    }
+    console.log(`[Reset Password] Step 1 OK: Valid token for ${user.email} (expires ${user.resetPasswordExpires.toISOString()})`);
+
+    // ── Step 2: Update password in Firebase Authentication ──
+    // Login uses Firebase Auth (signInWithEmailAndPassword), so the password
+    // MUST be updated in Firebase Auth — not just in MongoDB — for the new
+    // password to work at the sign-in screen.
+    console.log(`[Reset Password] Step 2: Updating password in Firebase Auth for ${user.email}...`);
+    try {
+      await updateFirebasePassword(user.email, newPassword);
+      console.log(`[Reset Password] Step 2 OK: Firebase Auth password updated for ${user.email}`);
+    } catch (firebaseErr) {
+      console.error("[Reset Password] Step 2 FAIL: Firebase Auth update error:", {
+        message: firebaseErr.message,
+        email: user.email
+      });
+      return res.status(500).json({
+        error: "Failed to update password. Please try again or request a new reset link."
+      });
     }
 
-    // Clean up single-use reset token (Firebase Auth is single source of truth for passwords)
+    // ── Step 3: Invalidate the single-use token in MongoDB ──
+    console.log(`[Reset Password] Step 3: Invalidating reset token in MongoDB...`);
     await userCollec.updateOne(
       { _id: user._id },
       {
-        $set: {
-          passwordUpdatedAt: new Date()
-        },
+        $set: { passwordUpdatedAt: new Date() },
         $unset: {
-          password: "",
           resetPasswordToken: "",
           resetPasswordExpires: ""
         }
       }
     );
+    console.log(`[Reset Password] Step 3 OK: Token invalidated for ${user.email}.`);
 
-    console.log(`[Reset Password] Completed for ${user.email}. Token invalidated.`);
-
-    res.json({ success: true, message: "Password updated successfully! You can now sign in with your new password." });
+    console.log(`[Reset Password] ✅ Complete: password reset successful for ${user.email}`);
+    return res.json({
+      success: true,
+      message: "Password updated successfully! You can now sign in with your new password."
+    });
   } catch (err) {
-    console.error("Reset password error:", err);
-    res.status(500).json({ error: err.message || "Failed to reset password" });
+    console.error("[Reset Password] UNHANDLED ERROR:", { message: err.message, stack: err.stack });
+    return res.status(500).json({ error: "An unexpected error occurred. Please try again." });
   }
 });
 
