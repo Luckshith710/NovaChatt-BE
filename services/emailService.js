@@ -7,7 +7,6 @@ function getTransporter() {
   const user = process.env.GMAIL_USER ? process.env.GMAIL_USER.trim() : "";
   // Google App Passwords are shown as '4-char 4-char 4-char 4-char' (with spaces)
   // but SMTP requires the raw 16-character string with NO spaces whatsoever.
-  // .trim() only removes edge whitespace — .replace(/\s+/g, '') removes all spaces.
   const pass = process.env.GMAIL_APP_PASSWORD
     ? process.env.GMAIL_APP_PASSWORD.replace(/\s+/g, "")
     : "";
@@ -19,18 +18,20 @@ function getTransporter() {
   console.log(`[Email Service] Transporter config → user: "${user}", pass length: ${pass.length} chars (spaces stripped)`);
 
   return nodemailer.createTransport({
-    service: "gmail",
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true, // use SSL
     auth: {
       user: user || "",
       pass: pass || "",
     },
+    tls: {
+      rejectUnauthorized: false
+    },
     // Hard timeouts so the transporter never hangs the request indefinitely.
-    // connectionTimeout: time to establish the TCP socket (ms)
-    // greetingTimeout:   time to receive the SMTP greeting banner (ms)
-    // socketTimeout:     idle socket timeout after connection (ms)
-    connectionTimeout: 10000,
-    greetingTimeout: 8000,
-    socketTimeout: 15000,
+    connectionTimeout: 15000,
+    greetingTimeout: 12000,
+    socketTimeout: 20000,
   });
 }
 

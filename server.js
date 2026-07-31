@@ -272,7 +272,9 @@ app.post("/api/forgot-password", async (req, res) => {
       console.error(`[Forgot Password Workflow] Stage 5 FAIL: Email delivery failed for "${cleanEmail}". Reason:`, emailResult.error);
       console.log("[Forgot Password Workflow] ── Stage 6: Final API response (500 Error) ──");
       return res.status(500).json({
-        error: "Unable to send the password reset email. Please try again later."
+        error: emailResult.error
+          ? `Email delivery failed: ${emailResult.error}`
+          : "Unable to send the password reset email. Please verify backend environment variables."
       });
     }
 
@@ -290,7 +292,7 @@ app.post("/api/forgot-password", async (req, res) => {
     });
     console.log("[Forgot Password Workflow] ── Stage 6: Final API response (500 Error) ──");
     return res.status(500).json({
-      error: "Unable to send the password reset email. Please try again later."
+      error: `Unable to process password reset: ${err.message || "Server error"}`
     });
   }
 });
