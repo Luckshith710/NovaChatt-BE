@@ -259,7 +259,7 @@ app.post("/api/forgot-password", async (req, res) => {
     );
     console.log(`[Forgot Password Workflow] ── Stage 4 SUCCESS: MongoDB updated (Matched: ${updateResult.matchedCount}, Modified: ${updateResult.modifiedCount}) ──`);
 
-    let clientUrl = process.env.CLIENT_URL || "http://localhost:5173";
+    let clientUrl = (process.env.CLIENT_URL || "https://novachatt1.netlify.app").replace(/\/+$/, "");
     let resetLink = `${clientUrl}/change?token=${rawToken}`;
     console.log(`[Forgot Password Workflow] Reset URL generated: ${resetLink}`);
 
